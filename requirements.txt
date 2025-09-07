@@ -1,0 +1,8 @@
+# file: requirements.txt
+streamlit==1.31.0
+pyttsx3==2.90
+PyMuPDF==1.23.15
+python-docx==1.0.1
+streamlit-lottie==0.0.5
+requests==2.32.3
+numpy==1.26.4
