@@ -1,286 +1,193 @@
-# file: app.py
-"""
-Advanced TTS Studio  –  Streamlit Dark-Theme Demo
-Convert TXT, DOCX, PDF → speech with intelligent character filtering,
-voice-rate / pitch / volume controls, live waveform + 3-D Lottie avatar.
-Ready for Python 3.13 (no audioop / pydub).
-"""
+# ────────────────────────────────────────────────────────────────
+#  Advanced TTS Studio – Cloud-friendly (edge-tts backend)
+#  • Multiple accents, genders & speaking styles
+#  • Tone presets (Deep, Bright, Robot, Narrator …)
+#  • Dark neo-UI + 3-D Lottie avatar
+#  • WAV or MP3 download   (no audioop / pydub / pyttsx3)
+# ────────────────────────────────────────────────────────────────
+import re, io, base64, tempfile, os, pathlib, asyncio, json, subprocess, wave
+from typing import List, Dict
 
-import re, io, base64, tempfile, os, pathlib, subprocess, wave, json, requests
-from typing import Dict, List
-
-import numpy as np
 import streamlit as st
-import pyttsx3
+import numpy as np
+import fitz                     # PyMuPDF  (PDF ➜ text)
 from docx import Document
-import fitz                           # PyMuPDF
 from streamlit_lottie import st_lottie
+import edge_tts                 # Microsoft online TTS
+import requests
 
-# ──────────────────────────────── Page config ────────────────────────────────
-st.set_page_config(
-    page_title="Advanced TTS Studio",
-    page_icon="🎧",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ──────────────────────────────── Theme override ─────────────────────────────
+# ─────────────── Global look & feel ───────────────
+st.set_page_config(page_title="Advanced TTS Studio", page_icon="🎧", layout="wide")
 st.markdown(
     """
     <style>
-    /* Global dark background */
-    html, body, [class*="st-"] {
-        background-color:#0B1120;
-        color:#E5E7EB;
-        font-family:'Inter',sans-serif;
-    }
-    /* Title */
-    .title       {text-align:center; font-weight:800; font-size:3rem; color:#C084FC;}
-    /* Section cards */
-    .card        {background:#111827;border-radius:12px;padding:1.25rem 1.5rem;margin-bottom:1.2rem;border:1px solid #1F2937;}
-    /* Drag’n’drop dashed box */
-    .uploader > div:first-child {border:2px dashed #475569;border-radius:10px;}
-    /* Gradient CTA button */
-    .stButton>button {
-        border:0;
-        padding:0.6rem 1.2rem;
-        border-radius:8px;
-        background:linear-gradient(90deg,#7C3AED 0%,#EC4899 100%);
-        font-weight:600;color:#fff;
-    }
-    /* Sliders  — thumb/track colors */
-    input[type=range] {
-        accent-color:#C084FC;
-    }
-    /* Small footer */
-    footer {visibility:hidden;}
+    html,body,[class*="st-"]{background:#0B1120;color:#E5E7EB;font-family:Inter,sans-serif}
+    .title{font-weight:800;font-size:3rem;color:#C084FC;text-align:center}
+    .card{background:#111827;border-radius:12px;padding:1.25rem 1.6rem;margin-bottom:1.3rem;
+          border:1px solid #1F2937}
+    .stButton>button{background:linear-gradient(90deg,#7C3AED 0%,#EC4899 100%);
+                     color:#fff;border:0;padding:.55rem 1.3rem;border-radius:8px;font-weight:600}
+    input[type=range]{accent-color:#C084FC}
+    footer{visibility:hidden}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ──────────────────────────────── Constants ────────────────────────────────
-DEFAULT_RATE   = 175
-DEFAULT_VOLUME = 1.0
-DEFAULT_PITCH  = 1.0            # 0.5–1.5
-ALLOWED_RE     = re.compile(r"[A-Za-z0-9\s()]+")
+# ─────────────── Utils ───────────────
+ALLOWED_RE = re.compile(r"[A-Za-z0-9\s()]+")
 
-# ──────────────────────────────── Helpers ────────────────────────────────
-def load_lottie(url:str)->dict:
+TONE_PRESETS = {
+    "Neutral (Default)": dict(rate="+0%", pitch="+0Hz"),
+    "Deep Male":         dict(rate="-5%", pitch="-4Hz"),
+    "Bright Female":     dict(rate="+5%", pitch="+6Hz"),
+    "Robot":             dict(rate="+20%", pitch="-10Hz"),
+    "Story Narrator":    dict(rate="-10%", pitch="-2Hz"),
+}
+
+@st.cache_data(show_spinner="▶️  Fetching voice catalogue…")
+def load_voice_catalog() -> List[Dict]:
+    """Query Microsoft Edge TTS for full voice list (once per session)."""
+    return asyncio.run(edge_tts.list_voices())
+
+def lottie(url:str)->Dict:
     try:
         r=requests.get(url,timeout=6)
-        if r.status_code==200:
-            return r.json()
-    except Exception:
-        pass
+        if r.status_code==200: return r.json()
+    except Exception: pass
     return {}
 
-def extract_text(uploaded, suffix)->str:
+def extract_text(buf:io.BytesIO, suffix:str)->str:
     if suffix==".pdf":
-        with fitz.open(stream=uploaded.read(), filetype="pdf") as doc:
+        with fitz.open(stream=buf.read(), filetype="pdf") as doc:
             return " ".join(p.get_text() for p in doc)
     if suffix==".docx":
         tmp=tempfile.NamedTemporaryFile(delete=False,suffix=".docx")
-        tmp.write(uploaded.read()); tmp.close()
+        tmp.write(buf.read()); tmp.close()
         txt=" ".join(p.text for p in Document(tmp.name).paragraphs)
         os.unlink(tmp.name); return txt
     if suffix==".txt":
-        return uploaded.read().decode(errors="ignore")
+        return buf.read().decode(errors="ignore")
     return ""
 
 def clean_text(raw:str)->str:
     filtered="".join(ALLOWED_RE.findall(raw))
-    return re.sub(r"\((.*?)\)",lambda m:m.group(1),filtered)
+    return re.sub(r"\((.*?)\)", lambda m: m.group(1), filtered)
 
-def list_voices()->Dict[str,str]:
-    engine=pyttsx3.init()
-    vdict={}
-    for v in engine.getProperty("voices"):
-        lang=v.languages[0]
-        if isinstance(lang,bytes):
-            lang=lang.decode(errors="ignore")
-        vdict[v.id]=f"{v.name} – {lang}"
-    return vdict
-
-def synthesize_wav(text:str, voice_id:str, rate:int, volume:float, pitch:float)->bytes:
-    engine=pyttsx3.init()
-    engine.setProperty("voice",voice_id)
-    engine.setProperty("rate",rate)
-    engine.setProperty("volume",volume)
-    # Pitch is not supported on all engines; safe try:
-    try:
-        engine.setProperty("pitch", int(pitch*100))
-    except Exception:
-        pass
-    tmp=tempfile.NamedTemporaryFile(delete=False,suffix=".wav"); tmp.close()
-    engine.save_to_file(text,tmp.name); engine.runAndWait()
-    data=open(tmp.name,"rb").read(); os.remove(tmp.name)
+async def edge_tts_async(text:str, voice:str, rate:str, pitch:str) -> bytes:
+    tmp=tempfile.NamedTemporaryFile(delete=False,suffix=".mp3"); tmp.close()
+    await edge_tts.Communicate(
+        text, voice, rate=rate, pitch=pitch
+    ).save(tmp.name)
+    data=pathlib.Path(tmp.name).read_bytes(); os.remove(tmp.name)
     return data
 
-def convert_wav_to_mp3(wav_bytes:bytes, bitrate:str="192k")->bytes:
-    """Requires ffmpeg installed and on PATH."""
-    wav_file=tempfile.NamedTemporaryFile(delete=False,suffix=".wav"); wav_file.write(wav_bytes); wav_file.close()
-    mp3_file=tempfile.NamedTemporaryFile(delete=False,suffix=".mp3"); mp3_file.close()
-    cmd=["ffmpeg","-y","-i",wav_file.name,"-b:a",bitrate,mp3_file.name]
-    try:
-        subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)
-        mp3_data=open(mp3_file.name,"rb").read()
-    finally:
-        os.remove(wav_file.name); os.remove(mp3_file.name)
-    return mp3_data
+def wav_from_mp3(mp3:bytes) -> bytes:
+    """FFmpeg is available on Streamlit Cloud ─ convert to WAV for waveform display."""
+    mp3f=tempfile.NamedTemporaryFile(delete=False,suffix=".mp3"); mp3f.write(mp3); mp3f.close()
+    wavf=tempfile.NamedTemporaryFile(delete=False,suffix=".wav"); wavf.close()
+    subprocess.run(["ffmpeg","-loglevel","quiet","-y","-i",mp3f.name,wavf.name])
+    wav=pathlib.Path(wavf.name).read_bytes()
+    os.remove(mp3f.name); os.remove(wavf.name)
+    return wav
 
-def wav_waveform(wav_bytes:bytes, buckets:int=80)->List[float]:
-    buffer=io.BytesIO(wav_bytes)
-    with wave.open(buffer,"rb") as wf:
-        frames=wf.readframes(wf.getnframes())
-        samples=np.frombuffer(frames,dtype=np.int16)
-        # Down-sample into RMS buckets
-        samples=np.abs(samples)
-        bucket_size=int(len(samples)/buckets)+1
-        rms=[float(np.mean(samples[i:i+bucket_size])) for i in range(0,len(samples),bucket_size)]
-        norm=np.array(rms)/max(rms)
-    return norm.tolist()
+def waveform_data(wav:bytes,buckets:int=90)->List[float]:
+    with wave.open(io.BytesIO(wav)) as wf:
+        samples=np.frombuffer(wf.readframes(wf.getnframes()),dtype=np.int16)
+    samples=np.abs(samples); size=len(samples)//buckets+1
+    levels=[float(np.mean(samples[i:i+size])) for i in range(0,len(samples),size)]
+    mx=max(levels) or 1
+    return list(np.array(levels)/mx)
 
-def download_link(data:bytes, filename:str, mime:str)->str:
+def download_tag(data:bytes, fname:str, mime:str) -> str:
     b64=base64.b64encode(data).decode()
-    return f'<a href="data:{mime};base64,{b64}" download="{filename}">Download</a>'
+    return f'<a href="data:{mime};base64,{b64}" download="{fname}">Download</a>'
 
-# ──────────────────────────────── Layout ────────────────────────────────
+# ─────────────── UI ───────────────
 st.markdown('<div class="title">Advanced TTS Studio</div>', unsafe_allow_html=True)
-st.markdown("<p style='text-align:center;color:#94A3B8'>Convert text, PDF, and Word files to high-quality audio with intelligent character processing and immersive 3-D animations.</p>", unsafe_allow_html=True)
-st.markdown("")
+st.markdown("<p style='text-align:center;color:#94A3B8'>Multi-accent speech with tone presets & 3-D character</p>", unsafe_allow_html=True)
 
-left, right = st.columns((2,1),gap="large")
+left,right = st.columns((2,1), gap="large")
 
-# 3-D Lottie avatar
+# 3-D avatar pane
 with right:
-    st.markdown('<div class="card">',unsafe_allow_html=True)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### AI Character")
-    st_lottie(
-        load_lottie("https://assets8.lottiefiles.com/packages/lf20_1pxqjqps.json"),
-        height=380,
-        key="avatar",
-    )
-    st.markdown('<small style="color:#64748B">Click and drag to rotate<br>Scroll to zoom</small>', unsafe_allow_html=True)
-    st.markdown("</div>",unsafe_allow_html=True)
+    st_lottie(lottie("https://assets8.lottiefiles.com/packages/lf20_1pxqjqps.json"),
+              height=380, key="avatar")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 with left:
-    # ── Upload Section ────────────────────────────────────────────────────
-    st.markdown('<div class="card">',unsafe_allow_html=True)
-    st.markdown("### Upload Files")
-    uploaded=st.file_uploader(
-        "Drag & drop or browse to choose (TXT, DOCX, PDF, max 10 MB)",
-        type=["txt","docx","pdf"],
-        label_visibility="collapsed",
-        help="Supported formats: .txt . docx . pdf",
-    )
-    st.markdown("</div>",unsafe_allow_html=True)
+    # Upload
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### Upload File")
+    upload = st.file_uploader("TXT · DOCX · PDF (≤ 10 MB)", type=["txt","docx","pdf"])
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Text Content Section ──────────────────────────────────────────────
-    st.markdown('<div class="card">',unsafe_allow_html=True)
+    # Text content
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### Text Content")
-    sample_text=("India as global waste management innovator Community Empowerment. "
-                 "Grassroots environmental stewardship development …")
-    # Session storage for text
-    if "text_content" not in st.session_state: st.session_state.text_content=""
-    colA,colB=st.columns([1,8])
-    if colA.button("Load Sample"):
-        st.session_state.text_content=sample_text
-    colB.button("Clear", on_click=lambda:st.session_state.pop("text_content",None))
-    if uploaded and st.session_state.get("uploaded_parsed")!=uploaded.name:
-        st.session_state.text_content=extract_text(uploaded, pathlib.Path(uploaded.name).suffix.lower())
-        st.session_state.uploaded_parsed=uploaded.name
-    text=st.text_area(
-        "",
-        value=st.session_state.get("text_content",""),
-        height=180,
-        key="text_input",
-    )
-    st.markdown(f"<small style='color:#64748B'>Characters: {len(text):,} &nbsp; Words: {len(text.split()):,}</small>", unsafe_allow_html=True)
-    st.markdown("</div>",unsafe_allow_html=True)
+    if "text" not in st.session_state: st.session_state.text=""
+    if upload and st.session_state.get("loaded")!=upload.name:
+        st.session_state.text = extract_text(upload, pathlib.Path(upload.name).suffix.lower())
+        st.session_state.loaded = upload.name
+    txt = st.text_area("", value=st.session_state.text, height=160)
+    st.session_state.text = txt
+    st.markdown(f"<small style='color:#64748B'>Chars: {len(txt):,}&nbsp;Words: {len(txt.split()):,}</small>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Audio Settings Section ────────────────────────────────────────────
-    st.markdown('<div class="card">',unsafe_allow_html=True)
+    # Audio settings
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### Audio Settings")
+    voices = load_voice_catalog()
+    langs = sorted({v['Locale'] for v in voices})
+    genders = sorted({v['Gender'] for v in voices})
+    col1,col2 = st.columns(2)
+    lang_filter   = col1.selectbox("Language / Accent", ["All"]+langs)
+    gender_filter = col2.selectbox("Gender", ["All"]+genders)
+    filtered = [v for v in voices if (lang_filter=="All" or v['Locale']==lang_filter)
+                                   and (gender_filter=="All" or v['Gender']==gender_filter)]
+    voice_name = st.selectbox("Voice", [v['ShortName'] for v in filtered],
+                              format_func=lambda s: next(v['FriendlyName'] for v in voices if v['ShortName']==s))
+    tone = st.selectbox("Tone Preset", list(TONE_PRESETS.keys()))
+    add_rate = st.slider("Extra Rate (%)", -50, 50, 0, step=5)
+    add_pitch= st.slider("Extra Pitch (Hz)", -20, 20, 0, step=2)
+    out_fmt = st.selectbox("Output Format", ["MP3 (default)", "WAV (lossless)"])
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    voices=list_voices()
-    voice_id=st.selectbox("Voice Selection", list(voices.keys()), format_func=lambda k:voices[k])
-    rate=st.slider("Speech Rate",0.5,2.0,1.0,0.05, format="%.2fx")
-    pitch=st.slider("Voice Pitch",0.5,1.5,DEFAULT_PITCH,0.05, format="%.2f")
-    volume=st.slider("Volume",0.0,1.0,DEFAULT_VOLUME,0.05, format="%.0f%%",label_visibility="visible")
-
-    output_format=st.selectbox("Output Format", ["WAV (High Quality)","MP3 (Compressed)"])
-    st.markdown("#### Settings Preview")
-    st.markdown(f"""
-    • **Voice:** {voices[voice_id]}  
-    • **Speed:** {rate:.2f}×  
-    • **Pitch:** {pitch:.2f}  
-    • **Volume:** {int(volume*100)} %  
-    • **Format:** {output_format.split()[0]}
-    """)
-    st.markdown("</div>",unsafe_allow_html=True)
-
-    # ── Generate Button ───────────────────────────────────────────────────
+    # Generate
     if st.button("Generate Audio"):
-        if not text.strip():
-            st.warning("Please enter or upload some text.")
+        if not txt.strip():
+            st.warning("Enter or upload some text.")
         else:
-            cleaned=clean_text(text)
-            with st.spinner("Synthesizing audio…"):
-                wav_bytes=synthesize_wav(cleaned,voice_id,int(rate*100),volume,pitch)
-                if output_format.startswith("MP3"):
-                    try:
-                        audio_bytes=convert_wav_to_mp3(wav_bytes)
-                        mime="audio/mpeg"; ext="mp3"
-                    except Exception as e:
-                        st.error("FFmpeg not found. Falling back to WAV output.")
-                        audio_bytes=wav_bytes; mime="audio/wav"; ext="wav"
-                else:
-                    audio_bytes=wav_bytes; mime="audio/wav"; ext="wav"
-            st.success("Audio generated!")
+            base = TONE_PRESETS[tone]
+            rate = f"{int(base['rate'][:-1])+add_rate:+d}%"
+            pitch= f"{int(base['pitch'][:-2])+add_pitch:+d}Hz"
+            cleaned = clean_text(txt)
+            with st.spinner("Synthesising via edge-tts…"):
+                mp3_bytes = asyncio.run(edge_tts_async(cleaned, voice_name, rate, pitch))
+            if out_fmt.startswith("WAV"):
+                wav_bytes = wav_from_mp3(mp3_bytes)
+                audio_data, mime, ext = wav_bytes, "audio/wav", "wav"
+            else:
+                audio_data, mime, ext = mp3_bytes, "audio/mpeg", "mp3"
 
-            # ── Generated Audio Section ───────────────────────────────────
-            st.markdown('<div class="card">',unsafe_allow_html=True)
+            st.success("Audio ready!")
+            st.markdown('<div class="card">', unsafe_allow_html=True)
             st.markdown("### Generated Audio")
+            # Waveform
+            try:
+                wav_raw = wav_from_mp3(mp3_bytes) if mime=="audio/mpeg" else audio_data
+                st.bar_chart(waveform_data(wav_raw), use_container_width=True)
+            except Exception:
+                st.info("Waveform preview unavailable.")
+            st.audio(audio_data, format=mime)
+            st.markdown(download_tag(audio_data, f"speech.{ext}", mime), unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
-            # Waveform preview
-            amplitude=wav_waveform(wav_bytes, buckets=100)
-            st.bar_chart(amplitude,use_container_width=True)
-
-            # Player + slider
-            st.audio(audio_bytes, format=mime)
-
-            size_kb=len(audio_bytes)/1024
-            st.markdown(f"""
-            **Duration**&nbsp; ~{len(wav_bytes)/32000:.0f}s &nbsp;&nbsp;
-            **Size**&nbsp; ~{size_kb:.0f} KB &nbsp;&nbsp;
-            **Format**&nbsp; {ext.upper()}
-            """)
-            st.markdown(download_link(audio_bytes,f"speech.{ext}",mime),unsafe_allow_html=True)
-            st.markdown("</div>",unsafe_allow_html=True)
-
-    # ── Tips Section ───────────────────────────────────────────────────────
-    st.markdown('<div class="card">',unsafe_allow_html=True)
-    st.markdown("#### 💡 Pro Tips")
-    st.write("""
-    • Use slower rates for better comprehension  
-    • Adjust pitch for character-specific voices  
-    • WAV format offers maximum fidelity  
-    • Higher volumes work better with headphones  
-    """)
-    st.markdown("</div>",unsafe_allow_html=True)
-
-# ───────────── Footer ─────────────
+# Footer
 st.markdown(
-    """
-    <div style='text-align:center;padding:1.5rem 0;color:#94A3B8'>
-        Experience the future of text-to-speech with AI-powered character animations
-        <br>
-        <span style='color:#7C3AED'>⚙️ Smart Character Filtering</span> &nbsp;|&nbsp;
-        <span style='color:#C084FC'>🎛 Advanced Voice Controls</span> &nbsp;|&nbsp;
-        <span style='color:#4ADE80'>🛠 Multi-Format Export</span>
-    </div>
-    """,
+    "<div style='text-align:center;padding:1rem 0;color:#64748B'>© 2025 Advanced TTS Studio · edge-tts backend</div>",
     unsafe_allow_html=True,
 )
-
+    
