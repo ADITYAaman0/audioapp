@@ -7,3 +7,4 @@ streamlit-lottie
 requests
 numpy
 edge-tts
+streamlit-pdf-viewer

@@ -12,6 +12,7 @@ from docx import Document
 from streamlit_lottie import st_lottie
 import edge_tts
 import requests
+from streamlit_pdf_viewer import pdf_viewer
 
 # ───────────────  Look & Feel  ───────────────
 st.set_page_config(page_title="Advanced TTS Studio", page_icon="🎧", layout="wide")
@@ -137,6 +138,37 @@ with left:
     st.session_state.txt = txt
     st.markdown(f"<small style='color:#64748B'>Chars {len(txt):,} • Words {len(txt.split()):,}</small>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # PDF Viewer (only show if PDF is uploaded)
+    if uploaded and pathlib.Path(uploaded.name).suffix.lower() == ".pdf":
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("### PDF Preview")
+        
+        # Create two columns for controls and info
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            # PDF viewer options
+            viewer_width = st.slider("Viewer Width", 400, 800, 600, 50)
+            viewer_height = st.slider("Viewer Height", 300, 800, 500, 50)
+        
+        with col2:
+            st.markdown(f"**File:** {uploaded.name}")
+            st.markdown(f"**Size:** {len(uploaded.getvalue())} bytes")
+        
+        # Display PDF viewer
+        try:
+            pdf_viewer(
+                input=uploaded.getvalue(),
+                width=viewer_width,
+                height=viewer_height,
+                key="pdf_viewer"
+            )
+        except Exception as e:
+            st.error(f"Error displaying PDF: {str(e)}")
+            st.info("Try refreshing the page or upload a different PDF file.")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # Audio settings
     st.markdown('<div class="card">', unsafe_allow_html=True)
