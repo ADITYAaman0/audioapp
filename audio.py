@@ -127,8 +127,7 @@ CHARACTER_TIPS = [
 ]
 
 # OpenAI API Key - get from environment or Streamlit secrets
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY') or st.secrets.get("OPENAI_API_KEY", "")
-
+OPENAI_API_KEY ="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"
 # ───────────────  RAG Pipeline Classes  ───────────────
 
 class RelevanceAgent:
@@ -893,3 +892,4 @@ st.markdown(
     "<div style='text-align:center;padding:1rem 0;color:#64748B'>© 2025 Advanced TTS Studio with RAG · edge-tts · LangChain · Interactive AI Assistant</div>",
     unsafe_allow_html=True,
 )
+
