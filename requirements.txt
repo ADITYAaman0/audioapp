@@ -1,9 +1,25 @@
-# file: requirements.txt
-streamlit
-pyttsx3
-PyMuPDF
-python-docx
-streamlit-lottie
-requests
-numpy
-edge-tts
+# Streamlit Framework
+streamlit==1.30.0
+streamlit-lottie==0.0.5
+
+# Text-to-Speech
+edge-tts==6.1.9
+
+# Document Processing
+PyMuPDF==1.23.8
+python-docx==1.1.0
+
+# LangChain and RAG Components
+langchain==0.1.0
+langchain-openai==0.0.2
+openai==1.7.0
+tiktoken==0.5.2
+
+# Audio Processing
+numpy==1.24.3
+pydub==0.25.1
+
+# Utilities
+requests==2.31.0
+python-dotenv==1.0.0
+
